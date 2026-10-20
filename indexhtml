@@ -1,0 +1,240 @@
+Proposal: Porting "Awful — Law Debates" to a Free Google API Web Application
+The provided artifact ("Awful — Law Debates") is an elegantly styled philosophical debate simulator currently built for an internal platform environment (relying on proprietary claude.use("sample") and claude.use("db") functions).
+To port this artifact into a standalone, portable web application using a Google free API, we can migrate the AI backend to use the Google Gemini API (specifically via the Gemini Developer API Key, which includes a generous free tier suitable for hobbyists and prototypes).
+Key Architectural Changes
+ * AI Generation Engine:
+   * Current: Calls sample() via platform wrapper functions.
+   * Proposed: Direct integration with the Google Gemini API (gemini-2.5-flash or gemini-1.5-flash), accessed client-side via fetch using a user-provided or environment-injected Gemini API key.
+ * State Persistence:
+   * Current: Uses platform database hooks (claude.use("db")).
+   * Proposed: Standard browser localStorage or IndexedDB to save case histories, dockets, and round transcripts locally on the user's device.
+ * Execution Environment:
+   * Current: Restricted environment container.
+   * Proposed: A single, self-contained HTML file that can run locally in any browser or be deployed instantly for free via GitHub Pages, Vercel, or Netlify.
+Implementation Blueprint: Modified Script Section
+Below is the proposed update to the JavaScript section of your artifact, replacing the proprietary platform calls with native Google Gemini REST API calls and local storage persistence.
+// --- CONFIGURATION & STATE ---
+const topicInput = document.getElementById('topicInput');
+const openBtn = document.getElementById('openBtn');
+const arena = document.getElementById('arena');
+const sideA = document.getElementById('sideA');
+const sideB = document.getElementById('sideB');
+const gavelRow = document.getElementById('gavelRow');
+const gavelBtn = document.getElementById('gavelBtn');
+const statusEl = document.getElementById('status');
+const caseNoEl = document.getElementById('caseNo');
+const resumeRow = document.getElementById('resumeRow');
+
+let topic = '';
+let round = 0;
+let transcript = []; 
+let docketHistory = []; 
+let busy = false;
+
+// Prompt user for a Gemini Free API key if not already saved
+function getApiKey() {
+  let key = localStorage.getItem('gemini_api_key');
+  if (!key) {
+    key = prompt("Please enter your free Google Gemini API Key (get one from Google AI Studio):");
+    if (key) localStorage.setItem('gemini_api_key', key.trim());
+  }
+  return key;
+}
+
+function caseNumber(){
+  const n = String(Math.floor(Math.random()*900)+100);
+  return 'CASE NO. ' + n + '-AWFUL';
+}
+
+function setStatus(msg){ statusEl.textContent = msg; }
+
+function renderArgument(container, label, text){
+  const block = document.createElement('div');
+  block.className = 'round';
+  const stamp = document.createElement('div');
+  stamp.className = 'stamp';
+  stamp.textContent = label;
+  block.appendChild(stamp);
+  const arg = document.createElement('div');
+  arg.className = 'argument';
+  text.split(/\n\n+/).forEach(para=>{
+    if(!para.trim()) return;
+    const p = document.createElement('p');
+    p.textContent = para.trim();
+    arg.appendChild(p);
+  });
+  block.appendChild(arg);
+  container.appendChild(block);
+  block.scrollIntoView({behavior:'smooth', block:'end'});
+}
+
+// --- GOOGLE GEMINI API INTEGRATION ---
+async function callGemini(systemPrompt, userPrompt){
+  const apiKey = getApiKey();
+  if(!apiKey) throw new Error('Gemini API key is required to proceed.');
+
+  // Using gemini-2.5-flash (fast, lightweight, and supports free tier limits)
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+  
+  const payload = {
+    contents: [
+      { role: "user", parts: [{ text: systemPrompt + "\n\n" + userPrompt }] }
+    ]
+  };
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+
+  if(!response.ok){
+    const errData = await response.json();
+    throw new Error(errData.error?.message || 'API request failed');
+  }
+
+  const data = await response.json();
+  return data.candidates[0].content.parts[0].text.trim();
+}
+
+// --- LOCAL STORAGE PERSISTENCE ---
+function saveDocket(){
+  try{
+    const state = { topic, caseNo: caseNoEl.textContent, round, transcript, ts: Date.now(), history: docketHistory };
+    localStorage.setItem('awful_current_docket', JSON.stringify(state));
+  } catch(e){
+    console.warn('Persistence save failed:', e);
+  }
+}
+
+function restoreDocket(data){
+  topic = data.topic;
+  round = data.round;
+  transcript = data.transcript || [];
+  topicInput.value = topic;
+  sideA.querySelectorAll('.round').forEach(n=>n.remove());
+  sideB.querySelectorAll('.round').forEach(n=>n.remove());
+  arena.style.display = 'grid';
+  gavelRow.style.display = 'flex';
+  caseNoEl.style.display = 'block';
+  caseNoEl.textContent = data.caseNo || (caseNumber() + '  ·  ' + topic);
+  transcript.forEach(t => {
+    const label = 'ROUND ' + String(t.round).padStart(2,'0') + ' — FILED';
+    renderArgument(t.side === 'A' ? sideA : sideB, label, t.text);
+  });
+  renderResumeRow();
+  setStatus('Docket resumed. Call the next round when ready.');
+}
+
+function openHistoryEntry(idx){
+  const entry = docketHistory[idx];
+  if(!entry) return;
+  docketHistory = docketHistory.filter((_, i) => i !== idx);
+  restoreDocket(entry);
+  saveDocket();
+}
+
+function renderResumeRow(){
+  resumeRow.innerHTML = '';
+  let any = false;
+  docketHistory.forEach((entry, idx) => {
+    if(!entry || !entry.topic) return;
+    const preview = entry.topic.length > 50 ? entry.topic.slice(0, 50) + '…' : entry.topic;
+    const btn = document.createElement('button');
+    btn.className = 'gavel-btn';
+    btn.style.cssText = 'font-size:13px;padding:10px 22px;opacity:0.75;';
+    btn.textContent = 'Past debate: ' + preview;
+    btn.onclick = () => openHistoryEntry(idx);
+    resumeRow.appendChild(btn);
+    any = true;
+  });
+  resumeRow.style.display = any ? 'flex' : 'none';
+}
+
+function checkForSavedDocket(){
+  try{
+    const raw = localStorage.getItem('awful_current_docket');
+    if(!raw) return;
+    const data = JSON.parse(raw);
+    docketHistory = data.history || [];
+    if(data.topic){
+      topic = data.topic;
+      round = data.round;
+      transcript = data.transcript || [];
+      caseNoEl.textContent = data.caseNo || '';
+    }
+    renderResumeRow();
+  } catch(e){
+    console.warn('Persistence load failed:', e);
+  }
+}
+
+function buildHistoryText(){
+  return transcript.map(t => (t.side==='A' ? 'CLAIMANT' : 'RESPONDENT') + ': ' + t.text).join('\n\n---\n\n');
+}
+
+async function runRound(){
+  if(busy) return;
+  busy = true;
+  gavelBtn.disabled = true;
+  openBtn.disabled = true;
+  round += 1;
+
+  const history = buildHistoryText();
+  const roundLabel = 'ROUND ' + String(round).padStart(2,'0') + ' — FILED';
+
+  try {
+    setStatus('The claimant is drafting their argument…');
+    const claimantSystem = "You are counsel for the CLAIMANT in a structured historical-philosophical debate, arguing the affirmative side of the motion. Write a single compelling, well-reasoned argument (120-180 words), grounded in real philosophical and historical reasoning. Do not use stage directions or headers. Directly respond to prior debate history if available.";
+    const claimantUser = "Motion: " + topic + (history ? "\n\nDebate so far:\n" + history : "\n\nOpening round. State your strongest opening argument.");
+    const claimantText = await callGemini(claimantSystem, claimantUser);
+    transcript.push({side:'A', text: claimantText, round: round});
+    renderArgument(sideA, roundLabel, claimantText);
+
+    setStatus('The respondent is drafting their rebuttal…');
+    const respondentSystem = "You are counsel for the RESPONDENT in a structured historical-philosophical debate, arguing the negative side of the motion. Write a single compelling, well-reasoned argument (120-180 words), grounded in real philosophical and historical reasoning. Do not use stage directions or headers. Directly engage with and rebut the claimant's most recent point.";
+    const respondentUser = "Motion: " + topic + "\n\nDebate so far:\n" + buildHistoryText();
+    const respondentText = await callGemini(respondentSystem, respondentUser);
+    transcript.push({side:'B', text: respondentText, round: round});
+    renderArgument(sideB, roundLabel, respondentText);
+
+    setStatus('Round ' + round + ' filed. Call the next round when ready.');
+    await saveDocket();
+  } catch(err){
+    setStatus('The docket clerk encountered an error: ' + err.message);
+  } finally {
+    busy = false;
+    gavelBtn.disabled = false;
+    openBtn.disabled = false;
+  }
+}
+
+openBtn.addEventListener('click', async () => {
+  const newTopic = topicInput.value.trim();
+  if(!newTopic) return;
+  if(transcript.length > 0 && topic){
+    docketHistory = [{ topic, caseNo: caseNoEl.textContent, round, transcript, ts: Date.now() }, ...docketHistory].slice(0, 3);
+  }
+  topic = newTopic;
+  round = 0;
+  transcript = [];
+  sideA.querySelectorAll('.round').forEach(n=>n.remove());
+  sideB.querySelectorAll('.round').forEach(n=>n.remove());
+  arena.style.display = 'grid';
+  gavelRow.style.display = 'flex';
+  caseNoEl.style.display = 'block';
+  caseNoEl.textContent = caseNumber() + '  ·  ' + topic;
+  resumeRow.style.display = 'none';
+  setStatus('');
+  saveDocket();
+  runRound();
+});
+
+gavelBtn.addEventListener('click', runRound);
+topicInput.addEventListener('keydown', (e)=>{ if(e.key === 'Enter') openBtn.click(); });
+
+checkForSavedDocket();
+
+How to Deploy Your New App
+ * Create an index.html file combining your original styles, HTML layout, and the updated JavaScript code above.
+ * Obtain a free API key from Google AI Studio.
